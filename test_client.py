@@ -23,6 +23,9 @@ class TestClient:
     async def listen_for_messages(self):
         """監聽伺服器訊息"""
         try:
+            if self.websocket is None:
+                print(f"🔴 {self.player_name} 尚未連接到伺服器，無法監聽訊息")
+                return
             async for message in self.websocket:
                 data = json.loads(message)
                 await self.handle_message(data)
@@ -171,8 +174,8 @@ async def simulate_player(player_name: str, toss_count: int = 5):
         
         # 進行多次拋擲
         for i in range(toss_count):
-            # 隨機長按時間 (0-5秒)
-            hold_duration = random.uniform(0, 5)
+            # 隨機長按時間 (3-5秒)
+            hold_duration = random.uniform(3, 5.00000001)
             await client.toss_coin(hold_duration)
             
             # 隨機等待間隔
@@ -197,7 +200,7 @@ async def main():
     # 並行模擬多個玩家
     tasks = []
     for player_name in players:
-        task = asyncio.create_task(simulate_player(player_name, toss_count=8))
+        task = asyncio.create_task(simulate_player(player_name, toss_count=random.randint(5, 20)))
         tasks.append(task)
         # 錯開連接時間
         await asyncio.sleep(0.5)

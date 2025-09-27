@@ -1,5 +1,6 @@
 import asyncio
 import websockets
+from websockets.legacy.server import WebSocketServerProtocol
 import json
 import random
 import time
@@ -7,9 +8,11 @@ from typing import Dict, Set, Optional, List
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from enum import Enum
+import os
 
-# 遊戲狀態
-connected_clients: Set[websockets.WebSocketServerProtocol] = set()
+flip_time = {} #test
+
+connected_clients: Set[WebSocketServerProtocol] = set()
 water_cup: int = 0
 water_cup_limit: int = 200
 cloud_fragments_reward: int = 45
@@ -118,12 +121,12 @@ SERVER_EVENTS = {
         "priority": EventPriority.LOW
     }
 }
-
 @dataclass
 class Player:
     """玩家資料結構"""
     uuid: str
-    websocket: websockets.WebSocketServerProtocol
+    websocket: WebSocketServerProtocol
+    last_toss_time: float = 0
     last_toss_time: float = 0
 
 @dataclass
@@ -215,8 +218,8 @@ def get_current_heads_probability() -> float:
 def get_flip_decay_rate() -> float:
     """獲取翻轉機率衰減率（受事件影響）"""
     if is_event_active("overcome"):
-        return 0.09 * 0.6  # 克服阻力：衰減率變為原本的60%
-    return 0.09  # 正常9%
+        return 0.08 * 0.6  # 克服阻力：衰減率變為原本的60%
+    return 0.08  # 正常8%
 
 def get_fixed_flip_probability() -> Optional[float]:
     """獲取固定的翻轉機率（如果有相關事件）"""
@@ -260,10 +263,10 @@ def calculate_flip_probability(hold_duration: float) -> float:
     if hold_duration <= 0:
         return 0.5  # 基礎50%
     elif hold_duration >= 5:
-        return 1.0  # 最多100%
+        return 0.97  # 最多97%
     else:
-        # 線性插值：0秒=50%, 5秒=100%
-        return 0.5 + (hold_duration / 5.0) * 0.5
+        # 線性插值：0秒=50%, 5秒=97%
+        return 0.5 + (hold_duration / 5.0) * 0.47
 
 def perform_coin_flip(initial_flip_prob: float, player_uuid: str) -> CoinToss:
     """
@@ -293,14 +296,16 @@ def perform_coin_flip(initial_flip_prob: float, player_uuid: str) -> CoinToss:
     force_first_flip = is_event_active("speak_do")
     
     # 連續翻轉邏輯
-    flip_chance = 0.5  # 初始翻轉機率50%
-    decay_rate = get_flip_decay_rate()  # 獲取衰減率
+    flip_chance = initial_flip_prob
     fixed_prob = get_fixed_flip_probability()  # 檢查是否有固定機率
     
     flip_count = 0
     while True:
-        # 魚躍龍門：使用固定翻轉機率
+        time.sleep(0.0005)
+        
+        # 計算當前翻轉機率
         if fixed_prob is not None:
+            # 魚躍龍門：使用固定翻轉機率
             current_flip_chance = fixed_prob
         else:
             current_flip_chance = flip_chance
@@ -326,11 +331,22 @@ def perform_coin_flip(initial_flip_prob: float, player_uuid: str) -> CoinToss:
         else:
             tails_count += 1
         
-        # 機率衰減
-        if fixed_prob is None:  # 只有在沒有固定機率時才衰減
-            flip_chance -= decay_rate
-            if flip_chance < 0.1:
-                flip_chance = 0.1
+        # 混合衰減系統（只在非固定機率時生效）
+        if fixed_prob is None:
+            if flip_count <= 10:
+                # 前10次：線性衰減，每次減少0.5%
+                decay_amount = 0.005
+                if is_event_active("overcome"):
+                    decay_amount *= 0.6  # 克服阻力事件：衰減率變為60%
+                flip_chance = max(0.1, flip_chance - decay_amount)
+                print(f"玩家: {player_uuid} 線性衰減第{flip_count}次，機率: {flip_chance:.4f} (-{decay_amount:.2%})")
+            else:
+                # 第10次之後：指數衰減，每次×0.92
+                exponential_factor = 0.92
+                if is_event_active("overcome"):
+                    exponential_factor = 0.86 + (1 - 0.86) * 0.4  # 克服阻力：緩和指數衰減
+                flip_chance = max(0.1, flip_chance * exponential_factor)
+                print(f"玩家: {player_uuid} 指數衰減第{flip_count}次，機率: {flip_chance:.4f} (×{exponential_factor:.3f})")
         
         force_first_flip = False  # 強制翻轉只生效一次
     
@@ -510,7 +526,12 @@ async def handle_coin_toss(websocket, data: dict):
             } for key, event in active_events.items()],
             "timestamp": datetime.now().isoformat()
         }
-        
+        if flip_time.get(toss_result.heads_count + toss_result.tails_count):
+            flip_time[toss_result.heads_count + toss_result.tails_count] += 1
+        else:
+            flip_time[toss_result.heads_count + toss_result.tails_count] = 1
+        print(f"flip_time: {flip_time}")
+
         # 添加雲碎片獎勵資訊
         if total_fragments > 0:
             result_message["fragment_rewards"] = {
@@ -683,8 +704,10 @@ async def main():
     print("遊戲設定:")
     print("• 正面機率: 50% (女神捧著水壺)")
     print("• 反面機率: 50% (雲朵)")  
-    print("• 翻轉機率: 50% 起始，每次衰減 9%，最低 10%")
-    print("• 長按效果: 最多 5 秒提升翻轉機率至 100%")
+    print("• 翻轉機率: 50% 起始，混合衰減系統")
+    print("  - 前10次：每次 -2% (線性衰減)")
+    print("  - 10次後：每次 ×0.86 (指數衰減)")
+    print("• 長按效果: 最多 5 秒提升翻轉機率至 97%")
     print("• 雲碎片獎勵: 水杯滿時獲得 45 個")
     print("=" * 50)
     
